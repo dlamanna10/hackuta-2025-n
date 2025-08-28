@@ -1,0 +1,111 @@
+name: Workflow Reporter
+
+on:
+  workflow_run:
+    workflows: ["Label PRs", "Lint Check", "Build Check", "Security Check", "Gatekeeper", "Vercel Deployment"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_target'
+    steps:
+      - name: Get PR number
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // For workflow_run events, we need to find the PR associated with the head branch
+            const { data: pullRequests } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`,
+              state: 'open'
+            });
+            
+            console.log('Found PRs:', pullRequests.length);
+            console.log('Head branch:', context.payload.workflow_run.head_branch);
+            
+            if (pullRequests.length > 0) {
+              return pullRequests[0].number;
+            }
+            return null;
+
+      - name: Generate workflow report
+        if: steps.pr.outputs.result != 'null'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = ${{ steps.pr.outputs.result }};
+            const workflowName = context.payload.workflow_run.name;
+            const conclusion = context.payload.workflow_run.conclusion;
+            const runUrl = context.payload.workflow_run.html_url;
+            const duration = Math.round((new Date(context.payload.workflow_run.updated_at) - new Date(context.payload.workflow_run.created_at)) / 1000);
+            
+            const statusEmoji = conclusion === 'success' ? '✅' : 
+                               conclusion === 'failure' ? '❌' : 
+                               conclusion === 'cancelled' ? '⏹️' : '⚠️';
+            
+            const statusText = conclusion === 'success' ? 'Passed' : 
+                              conclusion === 'failure' ? 'Failed' : 
+                              conclusion === 'cancelled' ? 'Cancelled' : 'Completed';
+            
+            // Get existing comments to update or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            const reportComment = comments.find(comment => 
+              comment.body.includes('## 📊 Workflow Status Report') && 
+              comment.user.login === 'github-actions[bot]'
+            );
+            
+            let reportBody = `## 📊 Workflow Status Report\n\n`;
+            reportBody += `| Workflow | Status | Duration | Details |\n`;
+            reportBody += `|----------|--------|----------|----------|\n`;
+            
+            if (reportComment) {
+              // Update existing report
+              const existingBody = reportComment.body;
+              const tableMatch = existingBody.match(/\|----------|--------|----------|----------\|\n([\s\S]*?)(?:\n\n|$)/);
+              
+              if (tableMatch) {
+                let existingRows = tableMatch[1].trim().split('\n');
+                // Remove existing row for this workflow
+                existingRows = existingRows.filter(row => !row.includes(workflowName));
+                // Add new row
+                existingRows.push(`| ${workflowName} | ${statusEmoji} ${statusText} | ${duration}s | [View Details](${runUrl}) |`);
+                
+                reportBody += existingRows.join('\n') + '\n\n';
+              }
+              
+              reportBody += `*Last updated: ${new Date().toISOString()}*`;
+              
+              await github.rest.issues.updateComment({
+                comment_id: reportComment.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: reportBody
+              });
+            } else {
+              // Create new report
+              reportBody += `| ${workflowName} | ${statusEmoji} ${statusText} | ${duration}s | [View Details](${runUrl}) |\n\n`;
+              reportBody += `*Last updated: ${new Date().toISOString()}*`;
+              
+              await github.rest.issues.createComment({
+                issue_number: prNumber,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: reportBody
+              });
+            }

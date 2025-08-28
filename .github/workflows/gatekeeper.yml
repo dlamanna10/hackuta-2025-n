@@ -1,0 +1,43 @@
+name: Gatekeeper
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  gatekeeper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto-approve workflows
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Get all workflow runs for this PR
+            const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              status: 'waiting',
+              event: 'pull_request'
+            });
+
+            // Approve all waiting workflow runs
+            for (const run of runs.workflow_runs) {
+              if (run.head_sha === context.payload.pull_request.head.sha) {
+                try {
+                  await github.rest.actions.approveWorkflowRun({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: run.id
+                  });
+                  console.log(`Approved workflow run ${run.id}`);
+                } catch (error) {
+                  console.log(`Could not approve workflow run ${run.id}: ${error.message}`);
+                }
+              }
+            }

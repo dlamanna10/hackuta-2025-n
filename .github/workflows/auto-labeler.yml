@@ -1,0 +1,241 @@
+name: Label PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get PR number
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            return context.issue.number;
+
+      - name: Get changed files
+        id: changed-files
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = parseInt('${{ steps.pr.outputs.result }}');
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            
+            const changedFiles = files.map(file => file.filename);
+            console.log('Changed files:', changedFiles);
+            console.log('Event name:', context.eventName);
+            console.log('PR number from context:', prNumber);
+            
+            // Check file patterns
+            const patterns = {
+              styles: [/^src\/.*\.css$/, /^public\/.*\.css$/, /.*\.scss$/, /.*\.sass$/],
+              ci: [/^\.github\//, /^package.*\.json$/, /^pnpm-lock\.yaml$/, /^eslint\.config\./, /^next\.config\./, /^tailwind\.config\./, /^tsconfig\.json$/, /^postcss\.config\./, /^vercel\.json$/],
+              javascript: [/^src\/.*\.(js|jsx)$/],
+              typescript: [/^src\/.*\.(ts|tsx)$/],
+              config: [/^components\.json$/],
+              json: [/^src\/data\/.*\.json$/],
+              assets: [/^public\/(?!.*\.css$).*$/],
+              documentation: [/.*\.md$/],
+              test: [/.*\.(test|spec)\./, /^tests?\//, /^test\//]
+            };
+            
+            const results = {};
+            for (const [category, regexes] of Object.entries(patterns)) {
+              results[category] = changedFiles.some(file => 
+                regexes.some(regex => regex.test(file))
+              );
+              if (results[category]) {
+                console.log(`Category '${category}' matched for files:`, changedFiles);
+              }
+            }
+            console.log('Final results:', results);
+            
+            // Set outputs
+            for (const [category, hasChanges] of Object.entries(results)) {
+              core.setOutput(`${category}_any_changed`, hasChanges.toString());
+            }
+            
+            return results;
+
+      - name: Post labeling summary
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = parseInt('${{ steps.pr.outputs.result }}');
+            const results = JSON.parse('${{ steps.changed-files.outputs.result }}');
+            const appliedLabels = Object.entries(results)
+              .filter(([_, hasChanges]) => hasChanges)
+              .map(([category]) => category);
+            
+            if (appliedLabels.length > 0) {
+              await github.rest.issues.createComment({
+                issue_number: prNumber,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `🏷️ **Auto-Labeler Results**\n\nApplied labels: ${appliedLabels.map(label => `\`${label}\``).join(', ')}\n\nBased on detected file changes in this PR.`
+              });
+            }
+
+      - name: Add CI label
+        if: steps.changed-files.outputs.ci_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['ci']
+              });
+              console.log('Added CI label successfully');
+            } catch (error) {
+              console.log('Error adding CI label:', error.message);
+            }
+
+      - name: Add JavaScript label
+        if: steps.changed-files.outputs.javascript_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = parseInt('${{ steps.pr.outputs.result }}');
+            try {
+              await github.rest.issues.addLabels({
+                issue_number: prNumber,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['javascript']
+              });
+              console.log('Added JavaScript label successfully');
+            } catch (error) {
+              console.log('Error adding JavaScript label:', error.message);
+            }
+
+      - name: Add TypeScript label
+        if: steps.changed-files.outputs.typescript_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = parseInt('${{ steps.pr.outputs.result }}');
+            try {
+              await github.rest.issues.addLabels({
+                issue_number: prNumber,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['typescript']
+              });
+              console.log('Added TypeScript label successfully');
+            } catch (error) {
+              console.log('Error adding TypeScript label:', error.message);
+            }
+
+      - name: Add Config label
+        if: steps.changed-files.outputs.config_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['config']
+              });
+              console.log('Added Config label successfully');
+            } catch (error) {
+              console.log('Error adding Config label:', error.message);
+            }
+
+      - name: Add JSON label
+        if: steps.changed-files.outputs.json_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['json']
+              });
+              console.log('Added JSON label successfully');
+            } catch (error) {
+              console.log('Error adding JSON label:', error.message);
+            }
+
+      - name: Add Styles label
+        if: steps.changed-files.outputs.styles_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['css', 'styles']
+            })
+
+      - name: Add Assets label
+        if: steps.changed-files.outputs.assets_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['assets']
+            })
+
+      - name: Add Documentation label
+        if: steps.changed-files.outputs.documentation_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['doc']
+              });
+              console.log('Added Documentation label successfully');
+            } catch (error) {
+              console.log('Error adding Documentation label:', error.message);
+            }
+
+      - name: Add Test label
+        if: steps.changed-files.outputs.test_any_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['test']
+            })

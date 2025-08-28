@@ -1,0 +1,206 @@
+name: Status Reporter
+
+on:
+  workflow_run:
+    workflows: ["Lint Check", "Build Check", "Security Check", "Vercel Deployment"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  create-status-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for all workflows to complete
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Wait a bit to ensure other workflows have time to start/complete
+            await new Promise(resolve => setTimeout(resolve, 30000)); // 30 second delay
+            
+            // Get the PR info first
+            const { data: pullRequests } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`,
+              state: 'open'
+            });
+            
+            if (pullRequests.length === 0) {
+              console.log('No open PR found for this branch');
+              return;
+            }
+            
+            const prInfo = pullRequests[0];
+            console.log(`Found PR #${prInfo.number}`);
+            
+            // Required workflows that must complete before status report (excluding Gatekeeper and Label PRs)
+            const requiredWorkflows = [
+              'Lint Check', 
+              'Build Check', 
+              'Security Check', 
+              'Vercel Deployment'
+            ];
+            
+            let allCompleted = false;
+            let attempts = 0;
+            const maxAttempts = 10;
+            
+            while (!allCompleted && attempts < maxAttempts) {
+              attempts++;
+              console.log(`Attempt ${attempts}/${maxAttempts}: Checking workflow statuses...`);
+              
+              // Get all workflow runs for this PR
+              const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head_sha: prInfo.head.sha,
+                per_page: 50
+              });
+              
+              // Check if all required workflows are completed
+              const workflowStatuses = {};
+              runs.workflow_runs.forEach(run => {
+                if (requiredWorkflows.includes(run.name)) {
+                  workflowStatuses[run.name] = {
+                    status: run.status,
+                    conclusion: run.conclusion
+                  };
+                }
+              });
+              
+              console.log('Workflow statuses:', workflowStatuses);
+              
+              allCompleted = requiredWorkflows.every(workflow => {
+                const status = workflowStatuses[workflow];
+                return status && status.status === 'completed';
+              });
+              
+              if (!allCompleted) {
+                console.log('Not all workflows completed yet, waiting 30 seconds...');
+                await new Promise(resolve => setTimeout(resolve, 30000)); // Wait 30 seconds
+              }
+            }
+            
+            if (!allCompleted) {
+              console.log('Timeout: Not all workflows completed, proceeding anyway');
+            } else {
+              console.log('All workflows completed, proceeding with status report');
+            }
+
+      - name: Get PR info
+        id: pr-info
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Find the PR associated with this workflow run
+            const { data: pullRequests } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`,
+              state: 'open'
+            });
+            
+            if (pullRequests.length > 0) {
+              return {
+                number: pullRequests[0].number,
+                head_sha: pullRequests[0].head.sha
+              };
+            }
+            return null;
+
+      - name: Create/Update Status Report
+        if: steps.pr-info.outputs.result != 'null'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prInfo = JSON.parse('${{ steps.pr-info.outputs.result }}');
+            
+            // Get all workflow runs for this PR
+            const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: prInfo.head_sha,
+              per_page: 50
+            });
+
+                               // Filter to relevant workflows (exclude Gatekeeper and Label PRs)
+                   const workflowNames = [
+                     'Lint Check', 
+                     'Build Check', 
+                     'Security Check', 
+                     'Vercel Deployment'
+                   ];
+
+            const workflowStatus = {};
+            
+            for (const run of runs.workflow_runs) {
+              if (workflowNames.includes(run.name)) {
+                const status = run.status === 'completed' ? 
+                  (run.conclusion === 'success' ? '✅ Passed' :
+                   run.conclusion === 'failure' ? '❌ Failed' :
+                   run.conclusion === 'skipped' ? '⏸️ Skipped' : '⚠️ ' + run.conclusion) :
+                  '⏳ Running';
+                
+                const duration = run.status === 'completed' ? 
+                  Math.round((new Date(run.updated_at) - new Date(run.created_at)) / 1000) + 's' : '-';
+
+                workflowStatus[run.name] = {
+                  status,
+                  duration,
+                  url: run.html_url
+                };
+              }
+            }
+
+            // Create status table
+            let statusTable = `## 📊 Workflow Status Report\n\n`;
+            statusTable += `| Workflow | Status | Duration | Details |\n`;
+            statusTable += `|----------|--------|----------|----------|\n`;
+
+            for (const workflow of workflowNames) {
+              const info = workflowStatus[workflow] || { status: '⏳ Pending', duration: '-', url: '#' };
+              statusTable += `| ${workflow} | ${info.status} | ${info.duration} | [View](${info.url}) |\n`;
+            }
+
+            statusTable += `\n*Last updated: ${new Date().toLocaleString()}*\n`;
+            statusTable += `\n**Legend:** ⏳ Running/Pending • ✅ Passed • ❌ Failed • ⏸️ Skipped`;
+
+            // Check for existing status comment
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: prInfo.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+
+            const statusComment = comments.find(comment => 
+              comment.body.includes('📊 Workflow Status Report') && 
+              comment.user.login === 'github-actions[bot]'
+            );
+
+            if (statusComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                comment_id: statusComment.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: statusTable
+              });
+              console.log('Updated existing status comment');
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                issue_number: prInfo.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: statusTable
+              });
+              console.log('Created new status comment');
+            }
